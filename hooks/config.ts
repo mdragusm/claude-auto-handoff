@@ -21,8 +21,9 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // mode: "auto" hands off at the threshold by itself; "ask" puts Hand off now / Not yet buttons in
 // the band instead, and Not yet writes the brief for the person to edit before it is sent.
 export type Mode = 'auto' | 'ask'
-export type Config = { mode: Mode; threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
-export const DEFAULTS: Config = { mode: 'auto', threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
+// editor: the program that opens a brief for review; blank means the platform's default.
+export type Config = { mode: Mode; editor: string; threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
+export const DEFAULTS: Config = { mode: 'auto', editor: '', threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 export const MIN_HEADROOM = 40_000
 // In ask mode, a question dismissed (or a draft discarded) comes back once the context has grown this much more.
 export const ASK_STEP = 20_000
@@ -49,6 +50,7 @@ function pattern(v: unknown): RegExp | undefined {
 export function parseConfig(options: Record<string, unknown>): Config {
   return {
   mode: options.mode === 'ask' ? 'ask' : 'auto',
+  editor: typeof options.editor === 'string' ? options.editor.trim() : DEFAULTS.editor,
   threshold: num(options.threshold, DEFAULTS.threshold),
   maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
   briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),

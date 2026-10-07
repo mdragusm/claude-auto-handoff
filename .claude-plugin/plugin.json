@@ -16,6 +16,12 @@
       "options": ["auto", "ask"],
       "default": "auto"
     },
+    "editor": {
+      "type": "string",
+      "title": "Editor for a brief under review",
+      "description": "The program that opens the brief after Not yet or /handoff review, e.g. C:/Program Files/Notepad++/notepad++.exe. Blank: Notepad on Windows, the default text editor on macOS, xdg-open elsewhere.",
+      "default": ""
+    },
     "threshold": {
       "type": "number",
       "title": "Handoff threshold (tokens)",

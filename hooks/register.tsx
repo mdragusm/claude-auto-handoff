@@ -445,14 +445,18 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
 // A file: link for the panel. Windows paths come with backslashes, and a space breaks a markdown link.
 const fileUrl = (path: string) => encodeURI(`file:///${path.replace(/\\/g, '/').replace(/^\/+/, '')}`)
 
-// Opens the draft for editing: Notepad on Windows, the default text editor on macOS, xdg-open elsewhere.
-// Never throws: the panel's link opens it too.
+// Opens the draft for editing in the editor setting, else Notepad on Windows, the default text
+// editor on macOS, xdg-open elsewhere. Never throws: the panel's link opens it too.
 async function openInEditor($: EngineInterface, path: string) {
   try {
     if (await $.env.get('OS') === 'Windows_NT') {
-      // Start-Process returns at once; running notepad directly would hold the call until it closes.
-      await $.process.run(['powershell', '-NoProfile', '-Command', `Start-Process notepad.exe -ArgumentList ('"' + $env:AUTO_HANDOFF_BRIEF + '"')`],
-        { env: { AUTO_HANDOFF_BRIEF: path.replace(/\//g, '\\') } })
+      // Start-Process returns at once; running the editor directly would hold the call until it closes.
+      await $.process.run(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath $env:AUTO_HANDOFF_EDITOR -ArgumentList ('"' + $env:AUTO_HANDOFF_BRIEF + '"')`],
+        { env: { AUTO_HANDOFF_EDITOR: cfg.editor || 'notepad.exe', AUTO_HANDOFF_BRIEF: path.replace(/\//g, '\\') } })
+      return
+    }
+    if (cfg.editor) {
+      await $.process.run(['sh', '-c', '"$0" "$1" >/dev/null 2>&1 &', cfg.editor, path])
       return
     }
     const { stdout } = await $.process.run(['uname'])

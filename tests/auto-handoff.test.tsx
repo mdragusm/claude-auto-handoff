@@ -997,7 +997,15 @@ describe('ask mode and /handoff', () => {
     await $.command.run({ command: 'handoff', args: 'review' } as never)
     await clock.advance(1)
     await settle(() => calls.procs.some(a => a[0] === 'powershell'))
-    expect(calls.procs.find(a => a[0] === 'powershell')?.join(' ')).toContain('Start-Process notepad.exe')
+    expect(calls.procs.find(a => a[0] === 'powershell')?.join(' ')).toContain('Start-Process -FilePath $env:AUTO_HANDOFF_EDITOR')
+  })
+
+  test('the editor setting picks the program that opens the draft', { options: { mode: 'ask', editor: '/usr/bin/gedit' } }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.command.run({ command: 'handoff', args: 'review' } as never)
+    await clock.advance(1)
+    await settle(() => calls.procs.some(a => a.includes(BRIEF)))
+    expect(calls.procs.find(a => a.includes(BRIEF))?.slice(3)).toEqual(['/usr/bin/gedit', BRIEF])
   })
 
   test('Discard drops the draft and the question waits 20k', ASK, async ($, on) => {

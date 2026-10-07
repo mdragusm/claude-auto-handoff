@@ -12,7 +12,7 @@ A live run on Haiku with the threshold at 80k. The mod refuses a read at the thr
 
 `/handoff` hands the session off now, at any size. Set `mode` to `ask` in `/config` and the threshold asks instead of acting: the band above the prompt shows **Hand off now** and **Not yet: review the brief**.
 
-**Not yet** writes the brief to `~/.claude/state/auto-handoff/<session-id>.md` and opens it (Notepad on Windows, the default text editor on macOS, `xdg-open` elsewhere). Edit it, save, and press **Send handoff**: the mod clears and seeds the fresh session with your version. **Discard** drops it and the question comes back 20k later, as it does after **Dismiss**. In ask mode tool calls are never refused at the threshold; if the window fills anyway, auto-compact is still replaced by a handoff, with the draft if one is waiting.
+**Not yet** writes the brief to `~/.claude/state/auto-handoff/<session-id>.md` and opens it in the `editor` setting (blank: Notepad on Windows, the default text editor on macOS, `xdg-open` elsewhere). Edit it, save, and press **Send handoff**: the mod clears and seeds the fresh session with your version. **Discard** drops it and the question comes back 20k later, as it does after **Dismiss**. In ask mode tool calls are never refused at the threshold; if the window fills anyway, auto-compact is still replaced by a handoff, with the draft if one is waiting.
 
 | Command | What it does |
 |---|---|
@@ -64,6 +64,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 | Setting | Default | What it does |
 |---|---|---|
 | `mode` | `auto` | `auto` hands off at the threshold by itself. `ask` shows Hand off now / Not yet buttons instead |
+| `editor` | blank | Program that opens a brief under review. Blank: Notepad on Windows, the default text editor on macOS, `xdg-open` elsewhere |
 | `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
