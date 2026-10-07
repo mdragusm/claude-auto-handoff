@@ -10,13 +10,14 @@ A live run on Haiku with the threshold at 80k. The mod refuses a read at the thr
 
 ## Hand off on request, or review the brief first
 
-`/handoff` hands the session off now, at any size. Set `mode` to `ask` in `/config` and the threshold asks instead of acting: the band above the prompt shows **Hand off now** and **Not yet: review the brief**.
+`/handoff` asks with the same buttons as the threshold, at any size; `/handoff now` skips the question. Set `mode` to `ask` in `/config` and the threshold asks instead of acting: the band above the prompt shows **Hand off now** and **Not yet: review the brief**.
 
 **Not yet** writes the brief to `~/.claude/state/auto-handoff/<session-id>.md` and opens it in the `editor` setting (blank: Notepad on Windows, the default text editor on macOS, `xdg-open` elsewhere). Edit it, save, and press **Send handoff**: the mod clears and seeds the fresh session with your version. **Discard** drops it and the question comes back 20k later, as it does after **Dismiss**. In ask mode tool calls are never refused at the threshold; if the window fills anyway, auto-compact is still replaced by a handoff, with the draft if one is waiting.
 
 | Command | What it does |
 |---|---|
-| `/handoff` | Hand off now, or send the brief waiting for review |
+| `/handoff` | Show the Hand off now / Not yet buttons (or Send / Discard when a brief is waiting) |
+| `/handoff now` | Hand off now, or send the brief waiting for review |
 | `/handoff review` | Write the brief and open it for editing, without clearing |
 | `/handoff send` | Send the brief waiting for review |
 | `/handoff discard` | Drop the brief waiting for review |
@@ -121,6 +122,7 @@ The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
 
+- **0.9.1** Bare `/handoff` asks with buttons; `/handoff now` hands off. A `/clear` no longer waits on re-registering `/handoff`, which left a live handoff stuck on "clearing" with no seed.
 - **0.9.0** `/handoff` hands off on request, and `/handoff review` writes the brief to edit before **Send**. A `mode` setting: `ask` puts Hand off now / Not yet buttons in the band at the threshold instead of handing off by itself.
 
 - **0.8.6** On a machine without `sh` (Windows), the brief page is still written, and the link opens it as a local file instead of a server that never started. The viewer no longer shells out to `mkdir`.

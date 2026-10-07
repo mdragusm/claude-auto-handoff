@@ -540,12 +540,16 @@ async function ask($: EngineInterface, sessionId: string, tokens: number, thresh
   if (askedAt?.session === sessionId && tokens < askedAt.tokens + ASK_STEP) return
   askedAt = { session: sessionId, tokens }
   await log($, `ask session=${sessionId} tokens=${tokens} threshold=${threshold}`)
+  showAsk($, `context ${k(tokens)} is past ${k(threshold)}: hand off to a fresh session?`)
+}
+
+function showAsk($: EngineInterface, question: string) {
   showPanel($, {
-    header: { mark: 'warn', text: `context ${k(tokens)} is past ${k(threshold)}: hand off to a fresh session?` },
+    header: { mark: 'warn', text: question },
     steps: [],
     sticky: true,
     actions: [{ key: 'handoff-now', label: 'Hand off now', hotkey: '1', primary: true }, { key: 'handoff-review', label: 'Not yet: review the brief', hotkey: '2' }],
-  }, `context ${k(tokens)} is past ${k(threshold)}: /handoff to hand off, /handoff review to edit the brief first`)
+  }, `${question} /handoff now to hand off, /handoff review to edit the brief first`)
 }
 
 async function onAction($: EngineInterface, key: string) {
@@ -560,7 +564,7 @@ async function onAction($: EngineInterface, key: string) {
 
 async function registerCommand($: EngineInterface) {
   try {
-    await $.command.register({ name: 'handoff', description: 'Hand this session off to a fresh one now; "review" writes the brief to edit first', argumentHint: '[review|send|discard]' })
+    await $.command.register({ name: 'handoff', description: 'Hand this session off to a fresh one: asks, or "now", or "review" to edit the brief first', argumentHint: '[now|review|send|discard]' })
   } catch (err) {
     await log($, `command register failed ${String(err)}`)
   }
@@ -734,22 +738,30 @@ export const register: Register = (on, options) => {
       await discardDraft($)
       return { text: 'draft discarded' }
     }
-    if (arg && arg !== 'review' && arg !== 'send') return { text: 'usage: /handoff [review|send|discard]' }
-    if (arg === 'send' && !draft) return { text: 'no brief is waiting for review; /handoff hands off now' }
+    if (arg && arg !== 'now' && arg !== 'review' && arg !== 'send') return { text: 'usage: /handoff [now|review|send|discard]' }
+    if (arg === 'send' && !draft) return { text: 'no brief is waiting for review; /handoff now hands off' }
     if (inFlight || pending) return { text: 'a handoff is already under way' }
+    const sessionId = await $.session.id()
+    // Bare /handoff asks, with the same buttons as the threshold; a draft waiting shows its own.
+    if (!arg) {
+      if (draft?.oldSession === sessionId) showReview($)
+      else showAsk($, `context ${k((await $.session.usage()).context.tokens ?? 0)}: hand off to a fresh session?`)
+      return { text: 'choose above the prompt' }
+    }
     const review = arg === 'review'
     // The host refuses /clear from inside a command.run hook (it would wait on this hook), so the
     // work starts on a timer once the command has answered.
     $.clock.after(0, () => void startManual($, review).catch((err: unknown) => log($, `/handoff error ${String(err)}`)))
-    const sessionId = await $.session.id()
     const waiting = draft?.oldSession === sessionId ? draft.briefPath : undefined
     return { text: review ? (waiting ? `opening the brief at ${waiting}` : 'writing the brief for review') : waiting ? `handing off with the brief at ${waiting}` : 'handing off to a fresh session' }
   })
 
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
-    // A /clear starts a new session; keep /handoff in it.
-    if (e.source === 'clear') await registerCommand($)
+    await log($, `session start source=${e.source} pending=${pending ? short(pending.oldSession) : 'none'}`)
+    // A /clear starts a new session; keep /handoff in it. Not awaited: a live /clear on 2026-10-07
+    // never seeded, with no line after "queueing /clear", and this await was the new step in the path.
+    if (e.source === 'clear') void registerCommand($)
     if (e.transcript_path) transcriptPath = e.transcript_path
     if (e.source === 'startup') {
       await writeMissingTemplates($)

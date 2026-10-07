@@ -1026,9 +1026,9 @@ describe('ask mode and /handoff', () => {
     expect(calls.cleared).toBe(0)
   })
 
-  test('/handoff hands off now, under the threshold, in auto mode too', async ($, on) => {
+  test('/handoff now hands off, under the threshold, in auto mode too', async ($, on) => {
     const calls = engine(on, { tokens: 50_000 })
-    const r = await $.command.run({ command: 'handoff', args: '' } as never)
+    const r = await $.command.run({ command: 'handoff', args: 'now' } as never)
     await clock.advance(1)
     expect(r.text).toContain('handing off')
     await settle(() => calls.cleared > 0)
@@ -1044,6 +1044,30 @@ describe('ask mode and /handoff', () => {
     const r = await $.command.run({ command: 'handoff', args: 'send' } as never)
     await clock.advance(1)
     expect(r.text).toContain(BRIEF)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('a /clear seeds the fresh session even when registering /handoff never answers', async ($, on) => {
+    const calls = engine(on, { tokens: 50_000 })
+    on('command.register', () => new Promise(() => {}))
+    await $.command.run({ command: 'handoff', args: 'now' } as never)
+    await clock.advance(1)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain('handed off on request')
+  })
+
+  test('bare /handoff asks with buttons, and Hand off now hands off', async ($, on) => {
+    const calls = engine(on, { tokens: 50_000 })
+    const r = await $.command.run({ command: 'handoff', args: '' } as never)
+    expect(r.text).toContain('choose')
+    const ui = await mountBand($)
+    expect(textOf(await ui.drawn())).toContain('context 50k: hand off to a fresh session?')
+    expect(calls.cleared).toBe(0)
+    await ui.press({ key: 'handoff-now' })
+    await ui.unmount()
     await settle(() => calls.cleared > 0)
     expect(calls.cleared).toBe(1)
   })
