@@ -5,12 +5,14 @@ import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
+import { ASK_STEP, BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
 // wrapper pipes the session and owns the context limit (DISABLE_AUTO_COMPACT), the mod only logs.
+// In ask mode the threshold only asks; /handoff and the band's buttons hand off on request, and
+// a brief can be written first for the person to edit (a draft), then sent.
 
 let cfg: Config = DEFAULTS
 // Origins the engine stamps on a prompt the person sent; the seed arrives as { kind: 'plugin' }.
@@ -22,12 +24,17 @@ const CHARS_PER_TOKEN = 4
 const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 
 // problem: why the brief is facts only, when Haiku's summary was unusable.
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
+// manual: the person asked for this handoff (/handoff or a button), so the seed does not claim a limit.
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string; manual?: boolean }
 
 
 
 // Module variables survive /clear; $.state does not.
 let pending: Pending | undefined
+// A brief written for review and not sent yet; Send hands off with the file as the person left it.
+let draft: Pending | undefined
+// Ask mode: where the threshold question was last shown, so a dismissed one waits ASK_STEP before asking again.
+let askedAt: { session: string; tokens: number } | undefined
 let inFlight = false
 let seededSession: string | undefined
 let floor: number | undefined
@@ -194,7 +201,9 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
   }
 }
 
-async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
+// Writes the brief and its viewer pages, and answers what the clear and seed need; undefined when
+// no brief landed, which the panel says.
+async function writeBrief($: EngineInterface, sessionId: string, tokens: number, threshold: number, manual = false): Promise<Pending | undefined> {
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
@@ -237,22 +246,37 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
-    steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
-    await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
-    await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
-    $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
-      pending = undefined
-      // fired stays 'clearing', so this session does not try again; it carries on as it is.
-      failed($, '/clear was rejected', `this session keeps going; the brief is at ${briefPath}`)
-      await log($, `clear rejected ${String(err)}`)
-    })
+    await log($, `brief written ${briefPath} (${brief.length} chars)`)
+    return { oldSession: sessionId, briefPath, tokens, chain, link, problem, manual }
   } catch (err) {
-    pending = undefined
     // fired stays 'briefing', which tryHandoff treats as an orphan: the next turn tries again.
-    failed($, 'no brief written', 'this session keeps going and tries again after the next turn')
+    failed($, 'no brief written', manual ? 'this session keeps going; run /handoff to try again' : 'this session keeps going and tries again after the next turn')
     await log($, `handoff error session=${sessionId} ${String(err)}; no clear`)
+    return undefined
   }
+}
+
+// Queues /clear; the SessionStart hook seeds the fresh session from `pending`.
+async function clearAndSeed($: EngineInterface, p: Pending) {
+  pending = p
+  steps($, [briefStep(p.problem), { mark: 'spin', text: 'clearing' }])
+  try {
+    await $.store.set(`fired:${p.oldSession}`, p.problem ? `clearing-facts-only:${p.problem}` : 'clearing')
+    await log($, `queueing /clear for ${p.briefPath}`)
+  } catch (err) {
+    await log($, `clear marker failed ${String(err)}`)
+  }
+  $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
+    pending = undefined
+    // fired stays 'clearing', so this session does not try again; it carries on as it is.
+    failed($, '/clear was rejected', `this session keeps going; the brief is at ${p.briefPath}`)
+    await log($, `clear rejected ${String(err)}`)
+  })
+}
+
+async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number, manual = false) {
+  const p = await writeBrief($, sessionId, tokens, threshold, manual)
+  if (p) await clearAndSeed($, p)
 }
 
 // Shared by turn.complete and turn.step: the fired, kill-switch and loop-guard checks, then
@@ -418,6 +442,125 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
   addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, { mark: 'warn', text: 'auto-handoff' }, true)
 }
 
+// A file: link for the panel. Windows paths come with backslashes, and a space breaks a markdown link.
+const fileUrl = (path: string) => encodeURI(`file:///${path.replace(/\\/g, '/').replace(/^\/+/, '')}`)
+
+// Opens the draft for editing: Notepad on Windows, the default text editor on macOS, xdg-open elsewhere.
+// Never throws: the panel's link opens it too.
+async function openInEditor($: EngineInterface, path: string) {
+  try {
+    if (await $.env.get('OS') === 'Windows_NT') {
+      // Start-Process returns at once; running notepad directly would hold the call until it closes.
+      await $.process.run(['powershell', '-NoProfile', '-Command', `Start-Process notepad.exe -ArgumentList ('"' + $env:AUTO_HANDOFF_BRIEF + '"')`],
+        { env: { AUTO_HANDOFF_BRIEF: path.replace(/\//g, '\\') } })
+      return
+    }
+    const { stdout } = await $.process.run(['uname'])
+    await $.process.run(stdout.trim() === 'Darwin' ? ['open', '-t', path] : ['xdg-open', path])
+  } catch (err) {
+    await log($, `open draft failed ${path} ${String(err)}`)
+  }
+}
+
+// The person's own handoff, from /handoff or a band button: no threshold and no loop guard.
+// review: write the brief and stop, so it can be edited before Send. With a draft waiting, a
+// handoff sends the draft as the person left it.
+async function startManual($: EngineInterface, review: boolean): Promise<string> {
+  if (inFlight || pending) return 'a handoff is already under way'
+  const sessionId = await $.session.id()
+  if (draft && draft.oldSession !== sessionId) draft = undefined
+  if (draft) {
+    if (review) {
+      await openInEditor($, draft.briefPath)
+      showReview($)
+      return `the brief is waiting for review at ${draft.briefPath}`
+    }
+    const p = draft
+    draft = undefined
+    unattended = 0
+    await log($, `draft sent session=${sessionId} ${p.briefPath}`)
+    showPanel($, { header: { mark: 'spin', text: `handing off · ${k(p.tokens)}` }, steps: [] })
+    await clearAndSeed($, p)
+    return `handing off with the brief at ${p.briefPath}`
+  }
+  const tokens = ((await $.session.usage()).context.tokens ?? 0) + unmeasured
+  const threshold = await thresholdFor($, sessionId)
+  unattended = 0
+  pausedSession = undefined
+  inFlight = true
+  gated = undefined
+  await $.store.set(`fired:${sessionId}`, 'briefing')
+  await log($, `manual ${review ? 'review' : 'handoff'} session=${sessionId} tokens=${tokens}`)
+  showPanel($, { header: { mark: 'spin', text: `${review ? 'brief for review' : 'handing off'} · ${k(tokens)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] })
+  // Not awaited, as at the threshold: the brief can take a while.
+  const work = review ? reviewBrief($, sessionId, tokens, threshold) : handoff($, sessionId, tokens, threshold, true)
+  work.finally(() => { inFlight = false })
+  return review ? 'writing the brief for review' : 'handing off to a fresh session'
+}
+
+async function reviewBrief($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
+  const p = await writeBrief($, sessionId, tokens, threshold, true)
+  if (!p) return
+  draft = p
+  // Not cleared or seeded: the threshold leaves this session alone while the draft waits.
+  await $.store.set(`fired:${sessionId}`, 'review')
+  await openInEditor($, p.briefPath)
+  showReview($)
+}
+
+function showReview($: EngineInterface) {
+  if (!draft) return
+  showPanel($, {
+    header: { mark: 'warn', text: `handoff brief ready for review · ${k(draft.tokens)}` },
+    steps: [...(draft.problem ? [briefStep(draft.problem)] : []), { mark: 'warn', text: `edit and save ${draft.briefPath}, then Send` }],
+    link: fileUrl(draft.briefPath),
+    linkLabel: 'open the brief',
+    sticky: true,
+    actions: [{ key: 'handoff-send', label: 'Send handoff', hotkey: '1', primary: true }, { key: 'handoff-discard', label: 'Discard', hotkey: '2' }],
+  }, `handoff brief ready for review: ${draft.briefPath}`)
+}
+
+async function discardDraft($: EngineInterface) {
+  const p = draft
+  draft = undefined
+  hidePanel($)
+  if (!p) return
+  askedAt = { session: p.oldSession, tokens: p.tokens }
+  await $.store.delete(`fired:${p.oldSession}`)
+  await log($, `draft discarded session=${p.oldSession} ${p.briefPath}`)
+}
+
+// Ask mode at the threshold: the question, once per ASK_STEP of growth.
+async function ask($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
+  if (draft || inFlight || pending || await paneVar($)) return
+  if (askedAt?.session === sessionId && tokens < askedAt.tokens + ASK_STEP) return
+  askedAt = { session: sessionId, tokens }
+  await log($, `ask session=${sessionId} tokens=${tokens} threshold=${threshold}`)
+  showPanel($, {
+    header: { mark: 'warn', text: `context ${k(tokens)} is past ${k(threshold)}: hand off to a fresh session?` },
+    steps: [],
+    sticky: true,
+    actions: [{ key: 'handoff-now', label: 'Hand off now', hotkey: '1', primary: true }, { key: 'handoff-review', label: 'Not yet: review the brief', hotkey: '2' }],
+  }, `context ${k(tokens)} is past ${k(threshold)}: /handoff to hand off, /handoff review to edit the brief first`)
+}
+
+async function onAction($: EngineInterface, key: string) {
+  try {
+    if (key === 'handoff-now' || key === 'handoff-send') await startManual($, false)
+    else if (key === 'handoff-review') await startManual($, true)
+    else if (key === 'handoff-discard') await discardDraft($)
+  } catch (err) {
+    await log($, `action ${key} error ${String(err)}`)
+  }
+}
+
+async function registerCommand($: EngineInterface) {
+  try {
+    await $.command.register({ name: 'handoff', description: 'Hand this session off to a fresh one now; "review" writes the brief to edit first', argumentHint: '[review|send|discard]' })
+  } catch (err) {
+    await log($, `command register failed ${String(err)}`)
+  }
+}
 
 export const register: Register = (on, options) => {
   cfg = parseConfig(options)
@@ -440,6 +583,10 @@ export const register: Register = (on, options) => {
       }
       const threshold = await thresholdFor($, sessionId)
       if (tokens < threshold && gated !== sessionId) return r
+      if (cfg.mode === 'ask') {
+        await ask($, sessionId, tokens, threshold)
+        return r
+      }
       await tryHandoff($, sessionId, tokens, threshold, gated === sessionId ? 'turn.complete gated' : 'turn.complete')
     } catch (err) {
       await log($, `turn.complete error ${String(err)}`)
@@ -458,7 +605,7 @@ export const register: Register = (on, options) => {
         const tokens = (await $.session.usage()).context.tokens
         const projected = (tokens ?? 0) + unmeasured
         const threshold = await thresholdFor($, sessionId)
-        if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
+        if (inFlight || pending || (cfg.mode === 'auto' && tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
           if (!inFlight && !pending) gated = sessionId
           await log($, `tool refused session=${sessionId} tool=${e.tool} projected=${projected} threshold=${threshold}`)
           return { deny: `[auto-handoff] Not run: the context is past the handoff threshold (${k(projected)} ≥ ${k(threshold)}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
@@ -476,7 +623,7 @@ export const register: Register = (on, options) => {
   // crosses the threshold, end the turn here and hand off instead of sending a request
   // that may overflow the window.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId && !inFlight && !pending && e.index > 0) {
+    if (!e.agentId && cfg.mode === 'auto' && !inFlight && !pending && e.index > 0) {
       try {
         const tokens = (await $.session.usage()).context.tokens
         const sessionId = await $.session.id()
@@ -528,6 +675,13 @@ export const register: Register = (on, options) => {
       const tokens = ((await $.session.usage()).context.tokens ?? 0) + unmeasured
       const threshold = await thresholdFor($, sessionId)
       await log($, `auto-compact session=${sessionId} projected=${tokens}`)
+      // The window is full, so a draft waiting for review goes out as it stands.
+      if (draft?.oldSession === sessionId) {
+        // On a timer, as /handoff does: /clear from inside this hook would wait on the turn it holds.
+        $.clock.after(0, () => void startManual($, false).catch((err: unknown) => log($, `draft send error ${String(err)}`)))
+        unmeasured = 0
+        return { skip: 'auto-handoff: sending the reviewed brief instead of compacting' }
+      }
       if (await tryHandoff($, sessionId, tokens, threshold, 'session.compact')) {
         unmeasured = 0
         return { skip: 'auto-handoff: handing off to a fresh session instead of compacting' }
@@ -545,7 +699,7 @@ export const register: Register = (on, options) => {
   // Yields the band to a survey, and passes when there is nothing to show.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!shown || e.props.hasSurvey) return next(e)
-    return panelTree($.ui.resolve(e), shown, frame, () => hidePanel($))
+    return panelTree($.ui.resolve(e), shown, frame, () => hidePanel($), (key) => void onAction($, key))
   })
 
   on('ui.render', { component: 'UserMessage', props: { origin: { kind: 'plugin' } } }, async ($, e, next) => {
@@ -564,15 +718,44 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('session.start', async ($, e, next) => {
+    await registerCommand($)
+    return next(e)
+  })
+
+  on('command.run', { command: 'handoff' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'discard') {
+      if (!draft) return { text: 'no brief is waiting for review' }
+      await discardDraft($)
+      return { text: 'draft discarded' }
+    }
+    if (arg && arg !== 'review' && arg !== 'send') return { text: 'usage: /handoff [review|send|discard]' }
+    if (arg === 'send' && !draft) return { text: 'no brief is waiting for review; /handoff hands off now' }
+    if (inFlight || pending) return { text: 'a handoff is already under way' }
+    const review = arg === 'review'
+    // The host refuses /clear from inside a command.run hook (it would wait on this hook), so the
+    // work starts on a timer once the command has answered.
+    $.clock.after(0, () => void startManual($, review).catch((err: unknown) => log($, `/handoff error ${String(err)}`)))
+    const sessionId = await $.session.id()
+    const waiting = draft?.oldSession === sessionId ? draft.briefPath : undefined
+    return { text: review ? (waiting ? `opening the brief at ${waiting}` : 'writing the brief for review') : waiting ? `handing off with the brief at ${waiting}` : 'handing off to a fresh session' }
+  })
+
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
+    // A /clear starts a new session; keep /handoff in it.
+    if (e.source === 'clear') await registerCommand($)
     if (e.transcript_path) transcriptPath = e.transcript_path
     if (e.source === 'startup') {
       await writeMissingTemplates($)
       await keepServing($)
     }
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
-    if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
+    if (e.source === 'clear' && !pending && !inFlight) {
+      draft = undefined
+      if (shown) hidePanel($)
+    }
     if (e.source !== 'clear' || !pending) return r
     const p = pending
     pending = undefined
@@ -601,7 +784,8 @@ export const register: Register = (on, options) => {
       }
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
-      const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+      const why = p.manual ? 'The previous session was handed off on request and cleared.' : 'The previous session hit its context limit and was cleared.'
+      const text = `${SEED_PREFIX} ${short(p.oldSession)}. ${why} Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
       $.prompt.submit({ text }).catch((err: unknown) => {
         handedFrom = undefined
         failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)

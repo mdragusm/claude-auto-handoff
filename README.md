@@ -8,6 +8,19 @@ At the threshold, Haiku writes a structured handoff brief to disk. Then the mod 
 
 A live run on Haiku with the threshold at 80k. The mod refuses a read at the threshold, writes the brief, clears, and the fresh session is back at work about 7 seconds later at 31k. ([video](docs/demo.mp4))
 
+## Hand off on request, or review the brief first
+
+`/handoff` hands the session off now, at any size. Set `mode` to `ask` in `/config` and the threshold asks instead of acting: the band above the prompt shows **Hand off now** and **Not yet: review the brief**.
+
+**Not yet** writes the brief to `~/.claude/state/auto-handoff/<session-id>.md` and opens it (Notepad on Windows, the default text editor on macOS, `xdg-open` elsewhere). Edit it, save, and press **Send handoff**: the mod clears and seeds the fresh session with your version. **Discard** drops it and the question comes back 20k later, as it does after **Dismiss**. In ask mode tool calls are never refused at the threshold; if the window fills anyway, auto-compact is still replaced by a handoff, with the draft if one is waiting.
+
+| Command | What it does |
+|---|---|
+| `/handoff` | Hand off now, or send the brief waiting for review |
+| `/handoff review` | Write the brief and open it for editing, without clearing |
+| `/handoff send` | Send the brief waiting for review |
+| `/handoff discard` | Drop the brief waiting for review |
+
 ## Why not auto-compact?
 
 Auto-compact summarizes in place, and you can't control what it keeps. A handoff brief has a fixed structure that you can edit. It covers work in progress, decisions, assumptions to verify, dead ends, your last request and whether it was answered, and the next step. The files, commits and issues sections come from the transcript in code, so they don't depend on the model's memory.
@@ -50,6 +63,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
+| `mode` | `auto` | `auto` hands off at the threshold by itself. `ask` shows Hand off now / Not yet buttons instead |
 | `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
@@ -105,6 +119,8 @@ claude plugin test .
 The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
+
+- **0.9.0** `/handoff` hands off on request, and `/handoff review` writes the brief to edit before **Send**. A `mode` setting: `ask` puts Hand off now / Not yet buttons in the band at the threshold instead of handing off by itself.
 
 - **0.8.6** On a machine without `sh` (Windows), the brief page is still written, and the link opens it as a local file instead of a server that never started. The viewer no longer shells out to `mkdir`.
 - **0.8.5** Windows support, from [@davidboomcycle](https://github.com/davidboomcycle) (#3). The mod falls back to `USERPROFILE` when `HOME` is unset, so briefs no longer land in `<project>/undefined/`. Where there is no `sh`, the log is written through `$.fs`. The tests pass on Windows. The viewer server still needs a POSIX shell.

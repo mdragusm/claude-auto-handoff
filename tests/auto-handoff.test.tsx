@@ -5,7 +5,7 @@ import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isVali
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 
-type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number }
+type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number; procs: string[][] }
 
 // The test runs sandboxed, with no file access, so these stand in for the files in templates/:
 // the same headings and switches, shorter prose.
@@ -57,7 +57,7 @@ const files = (written: Record<string, string>) => Object.keys(written).filter(p
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
 function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
-  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0 }
+  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, procs: [] }
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
@@ -103,6 +103,7 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     }
   })
   on('process.run', async (_$, e) => {
+    calls.procs.push([...e.argv])
     // No `sh`, as on Windows: every sh call refused. The log's `sh` append is kept in the file store.
     if (opts.noSh && e.argv[0] === 'sh') throw new Error('ENOENT sh')
     if (e.argv[0] === 'sh' && e.argv[2]?.includes('>> "$2"')) {
@@ -917,5 +918,154 @@ describe('markUnverifiedFigures', () => {
 
   test('with no numbers block, any figure is marked', () => {
     expect(markUnverifiedFigures('at 120k', { filesModified: [], commits: [], issues: [] }).flagged).toEqual(['120k'])
+  })
+})
+
+describe('ask mode and /handoff', () => {
+  const BRIEF = '/home/test/.claude/state/auto-handoff/old-session.md'
+  const ASK = { options: { mode: 'ask' } }
+
+  test('ask mode: the threshold asks instead of handing off, and Hand off now hands off', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.completes).toBe(0)
+    expect(calls.cleared).toBe(0)
+    const ui = await mountBand($)
+    expect(textOf(await ui.drawn())).toContain('context 165k is past 160k: hand off to a fresh session?')
+    await ui.press({ key: 'handoff-now' })
+    await ui.unmount()
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain('handed off on request')
+    expect(calls.seeded[0]).toContain(`Read the brief at ${BRIEF}`)
+  })
+
+  test('ask mode: past the threshold, tool calls and requests go through', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 220_000 })
+    for (let i = 0; i < 5; i++) await $.tool.call({ tool: 'Read', file_path: `/export-${i}.txt` })
+    expect(calls.ran).toBe(5)
+    await step($)
+    expect(calls.steps).toBe(1)
+    expect(calls.cleared).toBe(0)
+  })
+
+  test('ask mode: a dismissed question comes back 20k later', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    const ui = await mountBand($)
+    await ui.press({ key: 'dismiss' })
+    await ui.unmount()
+    await $.turn.complete(TURN)
+    expect(await band($)).toBe('')
+    calls.tokens = 186_000
+    await $.turn.complete(TURN)
+    expect(await band($)).toContain('context 186k is past 160k')
+  })
+
+  test('Not yet writes the brief and opens it; Send hands off with the edited file', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    const ui = await mountBand($)
+    await ui.press({ key: 'handoff-review' })
+    await settle(() => calls.procs.some(a => a.includes(BRIEF)))
+    expect(calls.written[BRIEF]).toContain('Finish the parser refactor')
+    expect(calls.cleared).toBe(0)
+    expect(calls.procs.find(a => a.includes(BRIEF))).toEqual(['xdg-open', BRIEF])
+    const drawn = textOf(await ui.drawn())
+    expect(drawn).toContain('handoff brief ready for review')
+    expect(drawn).toContain('Send handoff')
+    // The threshold leaves the session alone while the draft waits.
+    await $.turn.complete(TURN)
+    expect(calls.completes).toBe(1)
+
+    calls.written[BRIEF] = calls.written[BRIEF]!.replace('Finish the parser refactor', 'Finish the parser refactor, then ship it')
+    await ui.press({ key: 'handoff-send' })
+    await ui.unmount()
+    await settle(() => calls.cleared > 0)
+    expect(calls.completes).toBe(1) // the edited brief is sent, not rewritten
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain(`Read the brief at ${BRIEF}`)
+    expect(calls.written[BRIEF]).toContain('then ship it')
+  })
+
+  test('on Windows the draft opens in Notepad', { options: { mode: 'ask' } }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, env: { OS: 'Windows_NT' } })
+    await $.command.run({ command: 'handoff', args: 'review' } as never)
+    await clock.advance(1)
+    await settle(() => calls.procs.some(a => a[0] === 'powershell'))
+    expect(calls.procs.find(a => a[0] === 'powershell')?.join(' ')).toContain('Start-Process notepad.exe')
+  })
+
+  test('Discard drops the draft and the question waits 20k', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    const ui = await mountBand($)
+    await ui.press({ key: 'handoff-review' })
+    await settle(() => calls.completes > 0)
+    await settle(() => calls.procs.some(a => a.includes(BRIEF)))
+    await ui.press({ key: 'handoff-discard' })
+    expect(textOf(await ui.drawn())).toBe('')
+    await ui.unmount()
+    await $.turn.complete(TURN)
+    expect(await band($)).toBe('')
+    calls.tokens = 186_000
+    await $.turn.complete(TURN)
+    expect(await band($)).toContain('hand off to a fresh session?')
+    expect(calls.cleared).toBe(0)
+  })
+
+  test('/handoff hands off now, under the threshold, in auto mode too', async ($, on) => {
+    const calls = engine(on, { tokens: 50_000 })
+    const r = await $.command.run({ command: 'handoff', args: '' } as never)
+    await clock.advance(1)
+    expect(r.text).toContain('handing off')
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('/handoff review, then /handoff send', async ($, on) => {
+    const calls = engine(on, { tokens: 50_000 })
+    await $.command.run({ command: 'handoff', args: 'review' } as never)
+    await clock.advance(1)
+    await settle(() => calls.procs.some(a => a.includes(BRIEF)))
+    expect(calls.cleared).toBe(0)
+    const r = await $.command.run({ command: 'handoff', args: 'send' } as never)
+    await clock.advance(1)
+    expect(r.text).toContain(BRIEF)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('/handoff send with no draft says so', async ($, on) => {
+    const calls = engine(on, { tokens: 50_000 })
+    const r = await $.command.run({ command: 'handoff', args: 'send' } as never)
+    await clock.advance(1)
+    expect(r.text).toContain('no brief is waiting')
+    expect(calls.cleared).toBe(0)
+  })
+
+  test('ask mode: a full window sends a draft waiting for review instead of compacting', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 174_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
+    await $.command.run({ command: 'handoff', args: 'review' } as never)
+    await clock.advance(1)
+    await settle(() => calls.procs.some(a => a.includes(BRIEF)))
+    const r = await $.session.compact({ trigger: 'auto', messages: BASIC })
+    expect(r.skip).toContain('reviewed brief')
+    await clock.advance(1)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+    expect(calls.completes).toBe(1)
+  })
+
+  test('ask mode: a full window still hands off instead of compacting', ASK, async ($, on) => {
+    const calls = engine(on, { tokens: 174_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
+    const r = await $.session.compact({ trigger: 'auto', messages: BASIC })
+    expect(r.skip).toContain('auto-handoff')
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
   })
 })

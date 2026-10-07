@@ -18,9 +18,14 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // that never count as edits.
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
 // machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
-export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
-export const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
+// mode: "auto" hands off at the threshold by itself; "ask" puts Hand off now / Not yet buttons in
+// the band instead, and Not yet writes the brief for the person to edit before it is sent.
+export type Mode = 'auto' | 'ask'
+export type Config = { mode: Mode; threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
+export const DEFAULTS: Config = { mode: 'auto', threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 export const MIN_HEADROOM = 40_000
+// In ask mode, a question dismissed (or a draft discarded) comes back once the context has grown this much more.
+export const ASK_STEP = 20_000
 // Each template's default, a file in the mod's templates/ folder.
 export const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
 export type TemplateKey = typeof TEMPLATES[number][0]
@@ -43,6 +48,7 @@ function pattern(v: unknown): RegExp | undefined {
 /** The /config values, each checked, with the manifest's defaults for anything missing or bad. */
 export function parseConfig(options: Record<string, unknown>): Config {
   return {
+  mode: options.mode === 'ask' ? 'ask' : 'auto',
   threshold: num(options.threshold, DEFAULTS.threshold),
   maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
   briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),

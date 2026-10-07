@@ -1,0 +1,6 @@
+{
+  "name": "claude-auto-handoff",
+  "description": "auto-handoff with /handoff and an ask mode that lets you review the brief before it is sent",
+  "owner": { "name": "mdragusm" },
+  "plugins": [{ "name": "auto-handoff", "source": "./" }]
+}

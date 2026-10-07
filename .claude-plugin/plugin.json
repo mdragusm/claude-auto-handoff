@@ -1,6 +1,6 @@
 {
   "name": "auto-handoff",
-  "version": "0.8.6",
+  "version": "0.9.0",
   "description": "Hands a Claude Code session off to a fresh one before the context fills: a Haiku-written brief, /clear, and a seed that points the new session at the brief.",
   "author": {
     "name": "Alex Hillman",
@@ -9,6 +9,13 @@
   "repository": "https://github.com/alexknowshtml/claude-auto-handoff",
   "license": "MIT",
   "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "At the threshold",
+      "description": "auto: hand off by itself. ask: show Hand off now / Not yet buttons above the prompt; Not yet writes the brief and opens it so you can edit it, then Send hands off with your version. /handoff works in both modes.",
+      "options": ["auto", "ask"],
+      "default": "auto"
+    },
     "threshold": {
       "type": "number",
       "title": "Handoff threshold (tokens)",

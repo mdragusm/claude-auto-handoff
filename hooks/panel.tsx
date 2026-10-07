@@ -6,8 +6,9 @@
 export type Mark = 'spin' | 'done' | 'warn' | 'fail'
 export type Line = { mark: Mark; text: string }
 // sticky: stays until dismissed (a failure, the pause, a warning); otherwise a panel with nothing
-// spinning collapses on its own.
-export type Panel = { header: Line; steps: Line[]; link?: string; sticky?: boolean }
+// spinning collapses on its own. actions: buttons drawn before Dismiss, each pressed by its key.
+export type Action = { key: string; label: string; hotkey?: string; primary?: boolean }
+export type Panel = { header: Line; steps: Line[]; link?: string; linkLabel?: string; sticky?: boolean; actions?: Action[] }
 
 export const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const GLYPH: Record<Exclude<Mark, 'spin'>, string> = { done: '✓', warn: '⚠', fail: '✗' }
@@ -24,7 +25,7 @@ const glyph = (m: Mark, frame: number) => m === 'spin' ? SPINNER[frame % SPINNER
 // The elements come from $.ui.resolve in the render hook.
 type Elements = { Box: any; Text: any; Markdown: any; Button: any }
 
-export function panelTree({ Box, Text, Markdown, Button }: Elements, p: Panel, frame: number, onDismiss: () => void) {
+export function panelTree({ Box, Text, Markdown, Button }: Elements, p: Panel, frame: number, onDismiss: () => void, onAction: (key: string) => void) {
   return (
     <Box flexDirection="column">
       <Box>
@@ -38,8 +39,13 @@ export function panelTree({ Box, Text, Markdown, Button }: Elements, p: Panel, f
           <Text dimColor={l.mark === 'done'}>{l.text}</Text>
         </Box>
       ))}
-      {p.link ? <Markdown text={`  [open brief](${p.link})`} /> : null}
-      {p.sticky ? <Button key="dismiss" label="Dismiss" onPress={onDismiss} /> : null}
+      {p.link ? <Markdown text={`  [${p.linkLabel ?? 'open brief'}](${p.link})`} /> : null}
+      <Box flexDirection="row" gap={1}>
+        {(p.actions ?? []).map((a) => (
+          <Button key={a.key} label={a.label} hotkey={a.hotkey} variant={a.primary ? 'primary' : undefined} onPress={() => onAction(a.key)} />
+        ))}
+        {p.sticky ? <Button key="dismiss" label="Dismiss" dimColor={!!p.actions?.length} onPress={onDismiss} /> : null}
+      </Box>
     </Box>
   )
 }
