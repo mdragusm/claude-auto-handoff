@@ -122,6 +122,7 @@ The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
 
+- **0.10.0** The fresh session is seeded once the mod's own `/clear` resolves. Live on Windows (Claude Code 2.1.293) `classic.SessionStart` never reached the mod, at startup or on `/clear`, so every handoff stopped at "clearing" and the templates were never copied out; startup work now runs on `session.start`. A leaner brief: six terse sections, empty facts sections and the Handoff Numbers left out of it, no "spawn a subagent to verify" step for the fresh session, and a shorter Haiku reply cap. Your own copies in `~/.claude/auto-handoff/` win over these defaults; delete them to pick the new ones up.
 - **0.9.1** Bare `/handoff` asks with buttons; `/handoff now` hands off. A `/clear` no longer waits on re-registering `/handoff`, which left a live handoff stuck on "clearing" with no seed.
 - **0.9.0** `/handoff` hands off on request, and `/handoff review` writes the brief to edit before **Send**. A `mode` setting: `ask` puts Hand off now / Not yet buttons in the band at the threshold instead of handing off by itself.
 

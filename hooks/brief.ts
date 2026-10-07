@@ -148,18 +148,23 @@ export type BriefContext = {
   instructions: string
 }
 
+// The facts as the brief carries them: only the sections with something in them. The Handoff
+// Numbers stay in Haiku's prompt (they check its figures) and out of the brief.
+function briefFacts(f: Facts, withLastMessage: boolean): string {
+  const parts = []
+  if (f.filesModified.length) parts.push(`## Files Modified\n${list(f.filesModified, '')}`)
+  if (f.commits.length) parts.push(`## Commits\n${list(f.commits, '')}`)
+  if (f.issues.length) parts.push(`## GitHub Issues Mentioned\n${f.issues.join(', ')}`)
+  if (withLastMessage) parts.push(`## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}`)
+  return parts.join('\n\n')
+}
+
 export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | undefined): string {
-  const header = `${renderTemplate(ctx.instructions, { priority: haiku ? hasUnansweredLastRequest(haiku) : false })}
+  const header = `${renderTemplate(ctx.instructions, { priority: haiku ? hasUnansweredLastRequest(haiku) : false }).trim()}
 
-## Session Handoff Brief
-
-- **Previous Session:** ${ctx.sessionId}
-- **Transcript:** \`${ctx.transcript}\`
-
-## How to Use This Brief
-${haiku ? 'Haiku wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.' : 'Haiku did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
+Previous session: ${ctx.sessionId} · transcript \`${ctx.transcript}\`${haiku ? '' : '\nThe summary failed, so this brief holds only facts from tool calls; read the transcript for the rest.'}`
   // A valid Haiku brief already quotes the last request in its own section.
-  return [header, haiku?.trim(), factsBlock(facts, !haiku)].filter(Boolean).join('\n\n')
+  return [header, haiku?.trim(), briefFacts(facts, !haiku)].filter(Boolean).join('\n\n')
 }
 
 // A token figure: "93k", "93.1k", "93,105 tokens", "93105 tokens".

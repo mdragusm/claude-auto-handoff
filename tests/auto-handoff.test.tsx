@@ -14,8 +14,8 @@ const SHIPPED_BRIEF = `Write a handoff brief with these sections.
 ## Work in Progress
 What was being worked on.
 
-## Questions Answered
-Things established.
+## Dead Ends
+Approaches ruled out.
 
 ## Last Request from the User
 Copy "Last Real User Message" verbatim. Then "Status: Answered / Partially answered / Not answered".
@@ -24,15 +24,9 @@ Copy "Last Real User Message" verbatim. Then "Status: Answered / Partially answe
 The next action.
 `
 const SHIPPED_INSTRUCTIONS = `## Instructions
-{{#priority}}
-**PRIORITY: The "Last Request from the User" section below is not yet answered. Answer that request as your first action.**
-{{/priority}}
-
-This turn was triggered by the system, not by a user.
-{{#priority}}Do the PRIORITY request and nothing else.{{/priority}}
-{{^priority}}If the brief includes in-progress or pending work, continue that work immediately.{{/priority}}
-
-**You MUST produce a text response before ending your turn.**
+This is a handoff from a previous session, not a new question.
+{{#priority}}**Answer the "Last Request from the User" below first, and do nothing else.**{{/priority}}
+{{^priority}}Continue any in-progress work.{{/priority}}
 `
 
 const BASIC: SessionMessage[] = [
@@ -126,6 +120,7 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     return { text: e.text }
   })
   on('classic.SessionStart', async () => ({}))
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('session.compact', async (_$, e) => {
     calls.compacts++
     return { messages: e.messages }
@@ -249,7 +244,7 @@ describe('auto-handoff', () => {
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(calls.cleared).toBe(1)
-    expect(brief).toContain('did not return a usable brief')
+    expect(brief).toContain('The summary failed')
     expect(brief).toContain('- /repo/src/a.ts')
   })
 
@@ -302,10 +297,9 @@ describe('auto-handoff', () => {
     await settle(() => calls.cleared > 0)
     const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
     expect(brief.startsWith('## Instructions')).toBe(true)
-    expect(brief).toContain('triggered by the system, not by a user')
-    expect(brief).toContain('continue that work immediately')
-    expect(brief).toContain('You MUST produce a text response')
-    expect(brief).not.toContain('PRIORITY')
+    expect(brief).toContain('This is a handoff from a previous session')
+    expect(brief).toContain('Continue any in-progress work.')
+    expect(brief).not.toContain('Answer the "Last Request')
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     expect(calls.seeded[0]).toContain('follow its Instructions section')
@@ -371,9 +365,9 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const written = calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? ''
-    expect(written).toContain('**PRIORITY:')
-    expect(written).toContain('Do the PRIORITY request and nothing else.')
-    expect(written.indexOf('**PRIORITY:')).toBeLessThan(written.indexOf('## Session Handoff Brief'))
+    expect(written).toContain('**Answer the "Last Request from the User" below first')
+    expect(written).not.toContain('Continue any in-progress work.')
+    expect(written.indexOf('**Answer the')).toBeLessThan(written.indexOf('Previous session: old-session'))
   })
 
   test('the brief template file sets the sections Haiku is asked for', async ($, on) => {
@@ -406,7 +400,7 @@ describe('auto-handoff', () => {
 
   test('a new session writes missing templates and leaves existing ones alone', async ($, on) => {
     const calls = engine(on, { tokens: 1_000, files: { '/home/test/.claude/auto-handoff/brief.md': 'mine' } })
-    await $.classic.SessionStart({ source: 'startup' })
+    await $.session.start({ cwd: '/home/test/proj', surface: 'terminal', isInteractive: true })
     expect(files(calls.written)).toEqual(['/home/test/.claude/auto-handoff/instructions.md'])
     expect(calls.written['/home/test/.claude/auto-handoff/instructions.md']).toContain('{{#priority}}')
   })
@@ -435,13 +429,16 @@ describe('auto-handoff', () => {
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).toContain('`~/.claude/projects/-home-test-proj/old-session.jsonl`')
-    expect(brief).toContain('## How to Use This Brief')
+    expect(brief).toContain('Previous session: old-session')
+    expect(brief).not.toContain('## Handoff Numbers') // kept in Haiku's prompt, out of the brief
+    expect(brief).not.toContain('None.') // empty facts sections are left out
     expect(brief).toContain('Finish the parser refactor')
     expect(brief).toContain('- feat(mods): auto-handoff (47edd8e)')
     expect(brief).not.toContain('## Last Real User Message') // Haiku's section quotes it; no duplicate
     const prompt = calls.prompts[0] ?? ''
     expect(prompt).toContain('- /repo/mod.ts')
-    expect(prompt).toContain('## Questions Answered')
+    expect(prompt).toContain('## Dead Ends')
+    expect(prompt).toContain('## Handoff Numbers')
     expect(prompt.indexOf('## Extracted Facts')).toBeLessThan(prompt.indexOf('## Next Step'))
   })
 
@@ -798,7 +795,10 @@ describe('auto-handoff', () => {
     await step($, 0)
     await clock.advance(10_000)
     expect(await band($)).toContain('⚠ brief is facts only') // sticky
-    await $.classic.SessionStart({ source: 'clear' })
+    // The person's /clear reaches the mod's command.run hook (its own clear never does).
+    await $.command.run({ command: 'clear', args: '' } as never)
+    await clock.advance(1)
+    await settle(() => (calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').includes('via=command'))
     expect(await band($)).toBe('')
     expect(calls.seeded.length).toBe(1)
   })
@@ -1046,6 +1046,18 @@ describe('ask mode and /handoff', () => {
     expect(r.text).toContain(BRIEF)
     await settle(() => calls.cleared > 0)
     expect(calls.cleared).toBe(1)
+  })
+
+  test('the clear seeds the fresh session by itself, with no SessionStart (live on Windows none arrived)', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await new Promise(r => setTimeout(r, 20)) // the clear's own hook schedules the seed after the clear returns
+    await clock.advance(1)
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded.length).toBe(1)
+    await $.classic.SessionStart({ source: 'clear' }) // a late one finds nothing pending
+    expect(calls.seeded.length).toBe(1)
   })
 
   test('a /clear seeds the fresh session even when registering /handoff never answers', async ($, on) => {

@@ -33,6 +33,8 @@ type Pending = { oldSession: string; briefPath: string; tokens: number; chain: s
 let pending: Pending | undefined
 // A brief written for review and not sent yet; Send hands off with the file as the person left it.
 let draft: Pending | undefined
+// When the mod last queued its own /clear: a SessionStart for it soon after is not the person's clear.
+let ownClearAt = 0
 // Ask mode: where the threshold question was last shown, so a dismissed one waits ASK_STEP before asking again.
 let askedAt: { session: string; tokens: number } | undefined
 let inFlight = false
@@ -222,7 +224,7 @@ async function writeBrief($: EngineInterface, sessionId: string, tokens: number,
       model: 'haiku',
       system: 'You summarize coding sessions into precise handoff briefs.',
       prompt: briefPrompt(messages, facts, briefTemplate),
-      maxTokens: 4_000,
+      maxTokens: 1_500, // a lean brief; also a faster one
       timeoutMs: 60_000,
     })
     // A failed, empty or sectionless reply falls back to the facts.
@@ -266,7 +268,12 @@ async function clearAndSeed($: EngineInterface, p: Pending) {
   } catch (err) {
     await log($, `clear marker failed ${String(err)}`)
   }
-  $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
+  // The mod's own /clear skips its own command.run hook, and live classic.SessionStart never came,
+  // so the seed follows the clear's own promise; a SessionStart that does come finds nothing pending.
+  ownClearAt = Date.now()
+  $.command.run({ command: 'clear' }).then(() => {
+    $.clock.after(0, () => void afterClear($, 'clear').catch((err: unknown) => log($, `after clear error ${String(err)}`)))
+  }, async (err: unknown) => {
     pending = undefined
     // fired stays 'clearing', so this session does not try again; it carries on as it is.
     failed($, '/clear was rejected', `this session keeps going; the brief is at ${p.briefPath}`)
@@ -570,6 +577,62 @@ async function registerCommand($: EngineInterface) {
   }
 }
 
+// Seeds the fresh session after a /clear: from the mod's own clear once it resolves, from the
+// person's /clear through its command.run hook, and from classic.SessionStart where that arrives
+// (live on Windows, 2.1.293, it never did). Whichever runs first seeds; the rest find nothing pending.
+async function afterClear($: EngineInterface, via: string) {
+  await log($, `after clear via=${via} pending=${pending ? short(pending.oldSession) : 'none'}`)
+  void registerCommand($)
+  // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
+  // The mod's own clear, seen again after it seeded, is not one.
+  if (!pending) {
+    const own = via === 'clear' || (via === 'SessionStart' && Date.now() - ownClearAt < 30_000)
+    if (!own && !inFlight) {
+      draft = undefined
+      if (shown) hidePanel($)
+    }
+    return
+  }
+  const p = pending
+  pending = undefined
+  try {
+    const newSession = await $.session.id()
+    seededSession = newSession
+    floor = undefined
+    unmeasured = 0
+    await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
+    await log($, `seeding new=${newSession} from=${p.oldSession}`)
+    handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
+    steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
+    const own = await storedLineage($, p.oldSession)
+    const prior = own ? own.depth : 1
+    lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
+    await $.store.set(`lineage:${newSession}`, lineage)
+    // The old brief learns where it went, and its chain's pages link forward.
+    try {
+      const old = parseBrief(await $.fs.read(p.briefPath) as string)
+      // viewer: the page link, read by the status line script for the session it handed off to.
+      await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, old.body))
+      const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
+      await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
+    } catch (err) {
+      await log($, `viewer forward link failed ${String(err)}`)
+    }
+    // One line on screen; the model reads the brief from disk. A full brief as the
+    // seed showed up as a wall of text the person never wrote.
+    const why = p.manual ? 'The previous session was handed off on request and cleared.' : 'The previous session hit its context limit and was cleared.'
+    const text = `${SEED_PREFIX} ${short(p.oldSession)}. ${why} Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+    await log($, `seed submitted new=${newSession}`)
+    $.prompt.submit({ text }).catch((err: unknown) => {
+      handedFrom = undefined
+      failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
+      return log($, `seed rejected ${String(err)}`)
+    })
+  } catch (err) {
+    await log($, `seed error ${String(err)}`)
+  }
+}
+
 export const register: Register = (on, options) => {
   cfg = parseConfig(options)
   on('turn.complete', async ($, e, next) => {
@@ -726,8 +789,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // Once per process, before the first prompt (never on /clear). Startup work lives here rather
+  // than in classic.SessionStart, which did not reach the mod live.
   on('session.start', async ($, e, next) => {
     await registerCommand($)
+    await writeMissingTemplates($)
+    await keepServing($)
     return next(e)
   })
 
@@ -756,60 +823,17 @@ export const register: Register = (on, options) => {
     return { text: review ? (waiting ? `opening the brief at ${waiting}` : 'writing the brief for review') : waiting ? `handing off with the brief at ${waiting}` : 'handing off to a fresh session' }
   })
 
+  on('command.run', { command: 'clear' }, async ($, e, next) => {
+    const r = await next(e)
+    // On a timer: a prompt submitted from inside this hook would wait on it.
+    $.clock.after(0, () => void afterClear($, 'command').catch((err: unknown) => log($, `after clear error ${String(err)}`)))
+    return r
+  })
+
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
-    await log($, `session start source=${e.source} pending=${pending ? short(pending.oldSession) : 'none'}`)
-    // A /clear starts a new session; keep /handoff in it. Not awaited: a live /clear on 2026-10-07
-    // never seeded, with no line after "queueing /clear", and this await was the new step in the path.
-    if (e.source === 'clear') void registerCommand($)
     if (e.transcript_path) transcriptPath = e.transcript_path
-    if (e.source === 'startup') {
-      await writeMissingTemplates($)
-      await keepServing($)
-    }
-    // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
-    if (e.source === 'clear' && !pending && !inFlight) {
-      draft = undefined
-      if (shown) hidePanel($)
-    }
-    if (e.source !== 'clear' || !pending) return r
-    const p = pending
-    pending = undefined
-    try {
-      const newSession = await $.session.id()
-      seededSession = newSession
-      floor = undefined
-      unmeasured = 0
-      await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
-      await log($, `seeding new=${newSession} from=${p.oldSession}`)
-      handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
-      steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
-      const own = await storedLineage($, p.oldSession)
-      const prior = own ? own.depth : 1
-      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
-      await $.store.set(`lineage:${newSession}`, lineage)
-      // The old brief learns where it went, and its chain's pages link forward.
-      try {
-        const old = parseBrief(await $.fs.read(p.briefPath) as string)
-        // viewer: the page link, read by the status line script for the session it handed off to.
-        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, old.body))
-        const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
-        await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
-      } catch (err) {
-        await log($, `viewer forward link failed ${String(err)}`)
-      }
-      // One line on screen; the model reads the brief from disk. A full brief as the
-      // seed showed up as a wall of text the person never wrote.
-      const why = p.manual ? 'The previous session was handed off on request and cleared.' : 'The previous session hit its context limit and was cleared.'
-      const text = `${SEED_PREFIX} ${short(p.oldSession)}. ${why} Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
-      $.prompt.submit({ text }).catch((err: unknown) => {
-        handedFrom = undefined
-        failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
-        return log($, `seed rejected ${String(err)}`)
-      })
-    } catch (err) {
-      await log($, `seed error ${String(err)}`)
-    }
+    if (e.source === 'clear') await afterClear($, 'SessionStart')
     return r
   })
 }
